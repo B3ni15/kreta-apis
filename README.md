@@ -52,9 +52,6 @@ AxiosError: Hostname/IP does not match certificate's altnames: Host: bgeszc-eotv
     at process.processTicksAndRejections (node:internal/process/task_queues:95:5)
     at async User.getInfo (C:\Users\Beni\Pictures\kreta geci\index.js:215:26)
     at async C:\Users\Beni\Pictures\kreta geci\index.js:225:17 {
-  cert: {
-            Itt még sok minden van!
-}
 ```
 
 Szóval!
