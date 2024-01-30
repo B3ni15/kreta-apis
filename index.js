@@ -1,162 +1,97 @@
-const fetch = require('node-fetch');
-const { KretaAPI } = require("./api");
-const { getNonce } = require("./nonce");
+const https = require('https');
+const axios = require('axios');
+const crypto = require('crypto');
 
-class KretaClient {
-    constructor() {
-        this.accessToken = undefined;
-        this.refreshToken = undefined;
-        this.idToken = undefined;
-        this.userAgent = undefined;
+class Kreta {
+    static IDP = "https://idp.e-kreta.hu";
+}
+
+class KretaEndpoints {
+    static token = "/connect/token";
+    static nonce = "/nonce";
+}
+
+class User {
+    constructor(usr, pwd, ist) {
+        this.usr = usr;
+        this.pwd = pwd;
+        this.ist = ist;
+
+        // userAgent and clientID
+        this.userAgent = "hu.ekreta.student/1.0.5/Android/0/0";
+        this.clientID = "kreta-ellenorzo-mobile-android";
     }
 
-    async getAPI(url, headers = {}, { autoHeader = true, json = true, rawResponse = false } = {}) {
-        if (rawResponse) json = false;
+    async getToken() {
+        // gets access token
+        // headers: special to token
+        const key = Buffer.from([98, 97, 83, 115, 120, 79, 119, 108, 85, 49, 106, 77]);
 
-        try {
-            let res;
-
-            for (let i = 0; i < 3; i++) {
-                if (autoHeader) {
-                    if (!headers['authorization'] && this.accessToken) headers['authorization'] = `Bearer ${this.accessToken}`;
-                    if (!headers['user-agent'] && this.userAgent) headers['user-agent'] = this.userAgent;
+        // Újrapróbálkozás 3-szor, 1 másodperces késleltetéssel
+        async function retryWithDelay(fn, maxRetries, delay) {
+            let retries = 0;
+            while (retries < maxRetries) {
+                try {
+                    return await fn();
+                } catch (error) {
+                    console.error("Error:", error.message);
+                    retries++;
+                    await new Promise(resolve => setTimeout(resolve, delay));
                 }
-
-                const finalUrl = UserSettings.corsProxy === '' ? url : (UserSettings.corsProxy + url);
-
-                res = await fetch(finalUrl, {
-                    method: 'GET',
-                    headers: headers,
-                });
-
-                if (res.status == 401) {
-                    await this.refreshLogin();
-                    delete headers['authorization'];
-                } else {
-                    break;
-                }
-
-                this.sleep(500);
             }
-
-            if (!res) throw "Auth error";
-
-            if (json) {
-                return res.json();
-            } else if (rawResponse) {
-                return res.body;
-            } else {
-                return res.text();
-            }
-        } catch (error) {
-            if (error instanceof SyntaxError) {
-                console.error(`[reFilc-API]: KretaClient.getAPI (${url}) SyntaxError: ${error.message}`);
-            } else {
-                console.error(`[reFilc-API]: KretaClient.getAPI (${url}) UnknownException: ${error}`);
-            }
+            throw new Error("Max retries reached");
         }
-    }
 
-    async postAPI(url, body, headers = {}, { autoHeader = true, json = true } = {}) {
-        try {
-            let res;
-
-            for (let i = 0; i < 3; i++) {
-                if (autoHeader) {
-                    if (!headers['authorization'] && this.accessToken) headers['authorization'] = `Bearer ${this.accessToken}`;
-                    if (!headers['user-agent'] && this.userAgent) headers['user-agent'] = this.userAgent;
-                    if (!headers['content-type']) headers['content-type'] = 'application/json';
-                }
-
-                const finalUrl = UserSettings.corsProxy === '' ? url : (UserSettings.corsProxy + url);
-
-                res = await fetch(finalUrl, {
-                    method: 'POST',
-                    headers: headers,
-                    body: body,
-                });
-
-                if (res.status == 401 && !url.includes('/connect/token')) {
-                    await this.refreshLogin();
-                    delete headers['authorization'];
-                } else {
-                    break;
-                }
-            }
-
-            if (!res) throw "Auth error";
-
-            if (json) {
-                return res.json();
-            } else {
-                return res.text();
-            }
-        } catch (error) {
-            if (error instanceof SyntaxError) {
-                console.error(`[reFilc-API]: KretaClient.getAPI (${url}) SyntaxError: ${error.message}`);
-            } else {
-                console.error(`[reFilc-API]: KretaClient.getAPI (${url}) UnknownException: ${error}`);
-            }
-        }
-    }
-
-    async refreshLogin() {
-        const user = await UserDB.currentUser();
-        if (!user) return;
-
-        const headers = new Map([
-            ['content-type', 'application/x-www-form-urlencoded'],
-        ]);
-
-        const nonceString = await this.getAPI(KretaAPI.nonce, {}, { json: false });
-        const nonce = getNonce(nonceString, '72687219753', 'bgeszc-ganz');
-
-        const nonceHeaders = nonce.header();
-        nonceHeaders.forEach((value, key) => {
-            headers.set(key, value);
+        // Proxy beállítás
+        process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = 0; // Ezt csak a tesztelés során használd, ne termelésben!
+        const axiosInstance = axios.create({
+            httpsAgent: new https.Agent({
+                rejectUnauthorized: false
+            })
         });
 
+        // Így használd az axios helyett
+        try {
+            const nonce = await retryWithDelay(() => axios.get(Kreta.IDP + KretaEndpoints.nonce), 3, 1000)
+                .then(response => response.data)
+                .catch(error => {
+                    console.error("Error fetching nonce:", error.message);
+                    throw error;
+                });
 
-        const loginBody = {
-            'userName': '72730660790',
-            'password': 'Benedek2008',
-            'institute_code': 'bgeszc-eotvos',
-            'grant_type': 'password',
-            'client_id': KretaAPI.clientId,
-        };
+            const message = Buffer.from(this.ist.toUpperCase() + nonce + this.usr.toUpperCase(), 'utf-8');
+            const dig = crypto.createHmac('sha512', key).update(message).digest();
+            const generated = dig.toString('base64');
+            const headers = {
+                "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+                "User-Agent": "hu.ekreta.student/1.0.5/Android/0/0",
+                "X-AuthorizationPolicy-Key": generated,
+                "X-AuthorizationPolicy-Version": "v3",
+                "X-AuthorizationPolicy-Nonce": nonce
+            };
 
-        // const loginBody = `userName=${user.username}&password=${user.password}&institute_code=${user.instituteCode}&client_id=${KretaAPI.clientId}&grant_type=password`;
+            // data to send
+            const data = {
+                "userName": this.usr,
+                "password": this.pwd,
+                "institute_code": this.ist,
+                "grant_type": "password",
+                "client_id": this.clientID
+            };
 
-        const loginRes = await this.postAPI(KretaAPI.login, loginBody, Object.fromEntries(headers), {});
-
-        if (loginRes) {
-            if (loginRes["access_token"]) this.accessToken = loginRes["access_token"];
-            if (loginRes["refresh_token"]) this.refreshToken = loginRes["refresh_token"];
-
-            const newUser = new LoginUser(
-                user.id,
-                user.username,
-                user.password,
-                user.instituteCode,
-                user.student.name,
-                user.student,
-                '',
-                '',
-                loginRes["access_token"],
-            );
-            UserDB.deleteUser(user.id);
-            UserDB.addUser(newUser);
-        }
-    }
-
-    sleep(milliseconds) {
-        const start = new Date().getTime();
-        for (let i = 0; i < 1e7; i++) {
-            if ((new Date().getTime() - start) > milliseconds) {
-                break;
-            }
+            const response = await axiosInstance.post(`${Kreta.IDP}${KretaEndpoints.token}`, new URLSearchParams(data), { headers });
+            const accessToken = response.data.access_token;
+            console.log("Access Token:", accessToken);
+            return accessToken;
+        } catch (error) {
+            // occasionally it gives a 502 error
+            console.error("Error during getToken:", error.message);
+            throw error;
         }
     }
 }
 
-module.exports = KretaClient;
+// Example usage
+(async () => {
+    await new User('' , '' , '').getToken();
+})();
